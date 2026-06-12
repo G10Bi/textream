@@ -350,7 +350,7 @@ class SpeechRecognizer {
             .filter { $0.count >= 5 }
         allContext.append(contentsOf: Array(Set(contextWords)).prefix(50))
         if !allContext.isEmpty {
-            newRequest.contextualStrings = allContext
+            recognitionRequest.contextualStrings = allContext
         }
 
         let inputNode = audioEngine.inputNode
