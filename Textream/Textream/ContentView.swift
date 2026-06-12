@@ -408,15 +408,13 @@ Happy presenting! [wave]
         Group {
             if NotchSettings.shared.directorModeEnabled {
                 directorOverlay
-            } else if service.pages.count > 1 {
+            } else {
                 NavigationSplitView {
                     pageSidebar
                 } detail: {
                     mainContent
                 }
                 .navigationSplitViewColumnWidth(min: 160, ideal: 200, max: 260)
-            } else {
-                mainContent
             }
         }
         .alert(dropAlertTitle, isPresented: Binding(get: { dropError != nil }, set: { if !$0 { dropError = nil } })) {
@@ -534,10 +532,8 @@ Happy presenting! [wave]
             get: { service.currentPageIndex },
             set: { newValue in
                 if let index = newValue {
-                    DispatchQueue.main.async {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            service.currentPageIndex = index
-                        }
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        service.currentPageIndex = index
                     }
                 }
             }
@@ -616,7 +612,13 @@ Happy presenting! [wave]
             NSApp.windows.first?.makeKeyAndOrderFront(nil)
         }
         service.readPages.removeAll()
-        service.currentPageIndex = 0
+        // If the current page is empty, find the first non-empty page
+        let currentText = service.currentPageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if currentText.isEmpty {
+            if let firstNonEmpty = service.pages.firstIndex(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+                service.currentPageIndex = firstNonEmpty
+            }
+        }
         service.readCurrentPage()
         isRunning = true
     }

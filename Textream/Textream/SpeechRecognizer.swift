@@ -339,18 +339,18 @@ class SpeechRecognizer {
         recognitionRequest.shouldReportPartialResults = true
         
         // Add context from last spoken words
+        var allContext: [String] = []
         if !lastSpokenContext.isEmpty {
-        recognitionRequest.contextualStrings = [lastSpokenContext]
+            allContext.append(lastSpokenContext)
         }
-
-        // Add contextual strings from the source text to improve STT accuracy
+        // Context for remaining text
         let upcoming = String(sourceText.dropFirst(matchStartOffset))
         let contextWords = upcoming.split(separator: " ")
             .map { String($0).lowercased().filter { $0.isLetter || $0.isNumber } }
             .filter { $0.count >= 5 }
-        let uniqueContextWords = Array(Set(contextWords).prefix(50))
-        if !uniqueContextWords.isEmpty {
-            recognitionRequest.contextualStrings = uniqueContextWords
+        allContext.append(contentsOf: Array(Set(contextWords)).prefix(50))
+        if !allContext.isEmpty {
+            newRequest.contextualStrings = allContext
         }
 
         let inputNode = audioEngine.inputNode
@@ -438,6 +438,10 @@ class SpeechRecognizer {
 
                     self.matchStartOffset = self.recognizedCharCount
 
+                    // Distinguish timeout errors (expected every ~60s) from real errors.
+                    // SFSpeechRecognizer timeout is error code 1110 in kAFAssistantErrorDomain,
+                    // or 216 (kAudioConverterErr_FormatNotSupported). Retry immediately for
+                    // timeouts with no retry limit; use backoff for real errors.
                     let nsError = error as NSError
                     let isTimeout = nsError.code == 1110 || nsError.code == 216
 
@@ -530,31 +534,41 @@ class SpeechRecognizer {
         newRequest.shouldReportPartialResults = true
         
         // Add context from last spoken words
+        var allContext: [String] = []
         if !lastSpokenContext.isEmpty {
-            newRequest.contextualStrings = [lastSpokenContext]
+            allContext.append(lastSpokenContext)
         }
-        
         // Context for remaining text
         let upcoming = String(sourceText.dropFirst(matchStartOffset))
         let contextWords = upcoming.split(separator: " ")
             .map { String($0).lowercased().filter { $0.isLetter || $0.isNumber } }
             .filter { $0.count >= 5 }
-        let uniqueWords = Array(Set(contextWords).prefix(50))
-        if !uniqueWords.isEmpty {
-            newRequest.contextualStrings = uniqueWords
+        allContext.append(contentsOf: Array(Set(contextWords)).prefix(50))
+        if !allContext.isEmpty {
+            newRequest.contextualStrings = allContext
         }
-        
-        // Connect the new request to existing audio buffer
+
+        // Nil out recognitionRequest before cancelling the old task so the
+        // old task's error callback sees nil and skips retry logic. Then set
+        // the new request after cancellation.
+        requestLock.lock()
+        recognitionRequest?.endAudio()
+        recognitionRequest = nil
+        requestLock.unlock()
+        recognitionTask?.cancel()
+        recognitionTask = nil
+
         requestLock.lock()
         recognitionRequest = newRequest
         requestLock.unlock()
-        
-        // If recognizer is not available, retry later
+
+        // Start new recognition task
         guard let speechRecognizer, speechRecognizer.isAvailable else {
-            scheduleBeginRecognition(after: 0.2)
+            error = "Speech recognizer not available"
+            isListening = false
             return
         }
-        
+
         let currentGeneration = sessionGeneration
         recognitionTask = speechRecognizer.recognitionTask(with: newRequest) { [weak self] result, error in
             guard let self else { return }
@@ -570,7 +584,6 @@ class SpeechRecognizer {
             }
             if let error {
                 DispatchQueue.main.async {
-                    guard self.sessionGeneration == currentGeneration else { return }
                     guard self.recognitionRequest != nil else { return }
                     guard self.isListening && !self.shouldDismiss && !self.sourceText.isEmpty else {
                         self.isListening = false
