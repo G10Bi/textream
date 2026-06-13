@@ -260,8 +260,6 @@ class SpeechRecognizer {
             NotificationCenter.default.removeObserver(observer)
             configurationChangeObserver = nil
         }
-        // Nil out recognitionRequest before cancelling the old task so the
-        // old task's error callback sees nil and skips retry logic.
         requestLock.lock()
         recognitionRequest?.endAudio()
         recognitionRequest = nil
@@ -332,7 +330,7 @@ class SpeechRecognizer {
 
         speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: NotchSettings.shared.speechLocale))
         guard let speechRecognizer, speechRecognizer.isAvailable else {
-            error = "Speech recognizer not available"
+            scheduleBeginRecognition(after: 0.2)
             return
         }
 
@@ -341,17 +339,18 @@ class SpeechRecognizer {
         recognitionRequest.shouldReportPartialResults = true
         
         // Add context from last spoken words
-        var allContext: [String] = []
         if !lastSpokenContext.isEmpty {
-            allContext.append(lastSpokenContext)
+        recognitionRequest.contextualStrings = [lastSpokenContext]
         }
+
+        // Add contextual strings from the source text to improve STT accuracy
         let upcoming = String(sourceText.dropFirst(matchStartOffset))
         let contextWords = upcoming.split(separator: " ")
             .map { String($0).lowercased().filter { $0.isLetter || $0.isNumber } }
             .filter { $0.count >= 5 }
-        allContext.append(contentsOf: Array(Set(contextWords)).prefix(50))
-        if !allContext.isEmpty {
-            recognitionRequest.contextualStrings = allContext
+        let uniqueContextWords = Array(Set(contextWords).prefix(50))
+        if !uniqueContextWords.isEmpty {
+            recognitionRequest.contextualStrings = uniqueContextWords
         }
 
         let inputNode = audioEngine.inputNode
@@ -518,9 +517,11 @@ class SpeechRecognizer {
         
         // Lock the old request and task
         requestLock.lock()
-        recognitionRequest?.endAudio()
-        recognitionRequest = nil
+        let oldRequest = recognitionRequest
+        recognitionRequest = nil  // Prevent new appends
         requestLock.unlock()
+        
+        oldRequest?.endAudio()
         recognitionTask?.cancel()
         recognitionTask = nil
         
@@ -529,17 +530,18 @@ class SpeechRecognizer {
         newRequest.shouldReportPartialResults = true
         
         // Add context from last spoken words
-        var allContext: [String] = []
         if !lastSpokenContext.isEmpty {
-            allContext.append(lastSpokenContext)
+            newRequest.contextualStrings = [lastSpokenContext]
         }
+        
+        // Context for remaining text
         let upcoming = String(sourceText.dropFirst(matchStartOffset))
         let contextWords = upcoming.split(separator: " ")
             .map { String($0).lowercased().filter { $0.isLetter || $0.isNumber } }
             .filter { $0.count >= 5 }
-        allContext.append(contentsOf: Array(Set(contextWords)).prefix(50))
-        if !allContext.isEmpty {
-            newRequest.contextualStrings = allContext
+        let uniqueWords = Array(Set(contextWords).prefix(50))
+        if !uniqueWords.isEmpty {
+            newRequest.contextualStrings = uniqueWords
         }
         
         // Connect the new request to existing audio buffer
@@ -549,8 +551,7 @@ class SpeechRecognizer {
         
         // If recognizer is not available, retry later
         guard let speechRecognizer, speechRecognizer.isAvailable else {
-            error = "Speech recognizer not available"
-            isListening = false
+            scheduleBeginRecognition(after: 0.2)
             return
         }
         
@@ -577,10 +578,6 @@ class SpeechRecognizer {
                     }
                     
                     self.matchStartOffset = self.recognizedCharCount
-                    // Distinguish timeout errors (expected every ~60s) from real errors.
-                    // SFSpeechRecognizer timeout is error code 1110 in kAFAssistantErrorDomain,
-                    // or 216 (kAudioConverterErr_FormatNotSupported). Retry immediately for
-                    // timeouts with no retry limit; use backoff for real errors.
                     let nsError = error as NSError
                     let isTimeout = nsError.code == 1110 || nsError.code == 216
                     
@@ -658,7 +655,7 @@ class SpeechRecognizer {
         }
 
         // Check if at least 2 of the recent positions agree (within tolerance)
-        let agreementThreshold = 10 // characters
+        let agreementThreshold = 20 // characters
         var confirmed = false
         if recentMatchPositions.count >= 2 {
             var agreeCount = 0
@@ -672,7 +669,7 @@ class SpeechRecognizer {
 
         // Small forward movements (< 1 word length) are always allowed
         // to keep the highlight responsive for normal reading
-        let smallStep = candidate - recognizedCharCount <= 15
+        let smallStep = candidate - recognizedCharCount <= 20
 
         if confirmed || smallStep {
             recognizedCharCount = candidate
@@ -855,13 +852,13 @@ class SpeechRecognizer {
         if shorter >= 3 && (a.hasPrefix(b) || b.hasPrefix(a)) { return true }
         // Shared prefix >= 60% of shorter word (min 3 chars shared)
         let shared = zip(a, b).prefix(while: { $0 == $1 }).count
-        if shorter >= 3 && shared >= max(3, shorter * 3 / 5) { return true }
+        if shorter >= 3 && shared >= max(3, shorter / 2) { return true }
         // Edit distance tolerance — stricter for very short words
         let dist = editDistance(a, b)
         if shorter <= 2 { return false } // 2-char words must be exact
-        if shorter <= 4 { return dist <= 1 }
-        if shorter <= 8 { return dist <= 2 }
-        return dist <= max(a.count, b.count) / 3
+        if shorter <= 4 { return dist <= 2 }
+        if shorter <= 8 { return dist <= 3 }
+        return dist <= max(a.count, b.count) / 2
     }
 
     private func editDistance(_ a: String, _ b: String) -> Int {
